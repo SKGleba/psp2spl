@@ -12,6 +12,7 @@ void _start(void) {
 		fmnfo->status = 0x69;
 		u32_t (*ccode)(u32_t arg) = (void*)(fmnfo->codepaddr);
 		fmnfo->resp = ccode(fmnfo->arg);
+		return;
 	}
 	void (*fcmd_handler)(unsigned int fcmd) = (void*)((u32_t)0x00800adc);
 	fcmd_handler(*(unsigned int *)0xe0000010); // run cmd handler as usual
