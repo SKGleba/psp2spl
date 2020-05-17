@@ -9,6 +9,7 @@ Custom tiny lv0 framework for Playstation Vita/TV
 
 ## Basic info for developers
 ### This framework's only task is to run lv0 code when requested: check [spl_exec_code] in main.c
+### For any more advanced tasks use psp2renga - https://github.com/SKGleba/psp2renga
 	- For all communication ARM<->FRAMEWORK the secure kernel enc addr in Venezia SPRAM is used.
 		- In spl it is referred to as "commem" or "corridor", spl uses only first 32 bytes of it for config.
 	- There is one patch used: fcmd_handler() hook - After ARM command is received, before executing it.
