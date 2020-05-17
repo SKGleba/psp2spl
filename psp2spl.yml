@@ -1,0 +1,13 @@
+psp2spl:
+  attributes: 0
+  version:
+    major: 1
+    minor: 1
+  main:
+    start: module_start
+    stop: module_stop
+  modules:
+    SKPLForKernel:
+      functions:
+        - spl_exec_code
+        - spl_init
