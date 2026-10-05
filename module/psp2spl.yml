@@ -1,0 +1,15 @@
+psp2spl:
+  attributes: 0
+  version:
+    major: 2
+    minor: 0
+  main:
+    start: module_start
+    stop: module_stop
+  modules:
+    splForDriver:
+      functions:
+        - ksplmLv0Cmd
+        - ksplmTzsCmd
+        - ksplmRRC
+        - ksplmGetStatus
