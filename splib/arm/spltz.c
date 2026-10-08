@@ -225,8 +225,11 @@ int SPLx_TZS_SVA2PA(uint32_t sva, uint32_t *rpa) {
                 volatile uint32_t *l2ptv = (volatile uint32_t *)((uint32_t)layout->mbase + (paddr - layout->statics[SPLTZ_STATIC_RST]));
                 pparm = SPLTZl_TT_SDGETPAR(l2ptv[(sva % TT_SECTION_SIZE) / TT_PAGE_SIZE], pparm, &paddr);
                 type = TTSDC_MPAR_GET(_TYPE, pparm);
-                if (pparm && (type >= TTSDC_T_L2_LP) && (type <= TTSDC_T_L2_SP)) {
-                    *rpa = paddr + (sva % TT_PAGE_SIZE);
+                if (pparm) {
+                    if (type == TTSDC_T_L2_SP)
+                        *rpa = paddr + (sva % TT_PAGE_SIZE);
+                    else
+                        *rpa = paddr + (sva % TT_LPAGE_SIZE);
                     return 0;
                 }
             } else {
@@ -344,19 +347,25 @@ int SPLx_TZS_SMC_SET(int idx, int funcsva) {
         ? (layout->xsmct[SPLTZ_SMCT_FAST] + (idx * sizeof(uint32_t))) 
         : (layout->xsmct[SPLTZ_SMCT_FULL] + ((idx - 0x100) * sizeof(uint32_t)));
     if ((funcsva < 0) || !spl_tzs_write32) {
-        int *idxnsva = NULL;
-        ret = SPLx_TZS_SVA2NSVA(idxsva, (void*)&idxnsva);
-        if ((ret < 0) || !idxnsva) { 
-            SPLi_ERROR("Failed to get SMC 0x%X NSVA: ret=%d|0x%08X\n", idx, ret, (uint32_t)idxnsva); 
-            return ret; 
+        if (!spl_tzs_write32) {
+            int *idxnsva = NULL;
+            ret = SPLx_TZS_SVA2NSVA(idxsva, (void*)&idxnsva);
+            if ((ret < 0) || !idxnsva) { 
+                SPLi_ERROR("Failed to get SMC 0x%X NSVA: ret=%d|0x%08X\n", idx, ret, (uint32_t)idxnsva); 
+                return ret; 
+            }
+            if (funcsva >= 0) {
+                *idxnsva = funcsva;
+                return SPLi_SMCALL(TZS_SMC_FLUSH_L1C, 0, 0, 0, 0);
+            }
+            return *idxnsva;
         }
-        if (funcsva >= 0) {
-            *idxnsva = funcsva;
-            return SPLi_SMCALL(TZS_SMC_FLUSH_L1C, 0, 0, 0, 0);
-        }
-        return *idxnsva;
+        ret = SPLx_TZS_READ32(idxsva, (uint32_t*)&funcsva);
+        if (ret < 0)
+            return ret;
+        return funcsva;
     }
-    return spl_tzs_write32(idxsva, funcsva);
+    return SPLx_TZS_WRITE32(idxsva, funcsva);
 }
 
 int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint32_t *rsva) {
@@ -372,20 +381,35 @@ int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint3
         int ret = 0;
         switch (mod) {
             case SPLTZ_MODINFO_INTRMGR:
+            case SPLTZ_MODINFO_SYSMEM:
+            case SPLTZ_MODINFO_EXCPMGR:
                 if (!layout->msva[mod].text) {
-                    sb = (volatile uint32_t *)((uint32_t)layout->mbase + layout->statics[SPLTZ_STATIC_SYSROOT]);
                     fope = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_INTRMGR, spl_root->fw);
                     if (!fope) { 
-                        SPLi_ERROR("No OPEs available for m%d on fw=0x%08X\n", mod, spl_root->fw); 
+                        SPLi_ERROR("No OPEs available for m%d on fw=0x%08X\n", SPLTZ_MODINFO_INTRMGR, spl_root->fw); 
                         return -SPL_TZSGMSV_EBADICFG; 
                     }
-                    wb = sb[fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_SR_MHV_AO32]];
+                    if (mod == SPLTZ_MODINFO_INTRMGR) {
+                        sb = (volatile uint32_t *)((uint32_t)layout->mbase + layout->statics[SPLTZ_STATIC_SYSROOT]);
+                        wb = sb[fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_SR_MHV_AO32]];
+                    } else if (mod == SPLTZ_MODINFO_SYSMEM)
+                        wb = fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_XW4KBMP_SYSMEM_AO32] + layout->msva[SPLTZ_MODINFO_INTRMGR].text;
+                    else
+                        wb = fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_XW4KBMP_EXCPMGR_AO32] + layout->msva[SPLTZ_MODINFO_INTRMGR].text;
                     ret = SPLx_TZS_SVA2NSVA(wb, (void*)&sb);
                     if (ret < 0) { 
-                        SPLi_ERROR("Failed to find the xhandler table: %d\n", ret); 
+                        SPLi_ERROR("Failed to get m%d .text W4KB(m%d, 0x%08X) nsva: %d\n", SPLTZ_MODINFO_INTRMGR, mod, wb, ret); 
                         return ret; 
                     }
-                    layout->msva[mod].text = sb[fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_MHV_SMCH_AO32]] & ~0xFFF;
+                    if (mod == SPLTZ_MODINFO_INTRMGR)
+                        layout->msva[mod].text = sb[fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_MHV_SMCH_AO32]] & ~0xFFF;
+                    else {
+                        if (!IS_MOVW(sb[0]) || !IS_MOVT(sb[1])) { 
+                            SPLi_ERROR("!movp @ mod %d .text(0x%08X+0x%X): [0x%08X, 0x%08X, 0x%08X, 0x%08X]\n", 0, layout->msva[0].text, wb, sb[0], sb[1], sb[2], sb[3]);
+                            return -SPL_TZSGMSV_EBADMOVP; 
+                        }
+                        layout->msva[mod].text = (MOVW_GETA(sb[0]) | MOVT_GETA(sb[1])) & ~0xFFF; 
+                    }
                     SPLl_ROOTCHK(true);
                 }
             default:
@@ -418,18 +442,17 @@ int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint3
                     return ret; 
                 }
                 if (sb[0] != fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_WAT0x10]) { 
-                    SPLi_ERROR("Unexpected value at m%d .text+0x10\n", mod); 
-                    return ret; 
+                    SPLi_ERROR("Unexpected value at m%d .text+0x10: [0x%08X, 0x%08X]\n", mod, sb[0], sb[1]); 
+                    return -SPL_TZSGMSV_EBADICFG; 
                 }
-                if (!layout->msva[mod].data && fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_DATAMP]) {
-                    wb = fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_DATAMP];
+                if (!layout->msva[mod].data && (wb = fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_DATAMP], wb)) {
                     ret = SPLx_TZS_SVA2NSVA(layout->msva[mod].text + (wb & 0xFFFF), (void*)&sb);
                     if (ret < 0) { 
                         SPLi_ERROR("Failed to get m%d %d+0x%X SVA: ret=%d\n", mod, 1, wb & 0xFFFF, ret); 
                         return ret; 
                     }
                     if (!IS_MOVW(sb[0]) || !IS_MOVT(sb[1])) { 
-                        SPLi_ERROR("!movp @ mod %d .text+0x%X: [0x%08X, 0x%08X]\n", mod, wb, sb[0], sb[1]);
+                        SPLi_ERROR("!movp @ mod %d .text(0x%08X+0x%X): [0x%08X, 0x%08X, 0x%08X, 0x%08X]\n", mod, layout->msva[mod].text, wb & 0xFFFF, sb[0], sb[1], sb[2], sb[3]);
                         return -SPL_TZSGMSV_EBADMOVP; 
                     }
                     layout->msva[mod].data = (uint32_t)(MOVW_GETA(sb[0]) | MOVT_GETA(sb[1])) - (uint32_t)((wb >> 16) & 0xFFFF);
@@ -479,7 +502,7 @@ int SPLx_TZS_INIT(void) {
 
     // Statics
     uint32_t *pfw_statics = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_STATICS, spl_root->fw);
-    if (!pfw_statics) { SPLi_DEBUG("TZSI: No statics found for fw=0x%08X\n", spl_root->fw); return -SPL_TZSI_ENOOPES; }
+    if (!pfw_statics) { SPLi_ERROR("TZSI: No statics found for fw=0x%08X\n", spl_root->fw); return -SPL_TZSI_ENOOPES; }
     SPLi_MEMCPY(layout->statics, &pfw_statics[SPLOPEM_UNIQ], sizeof(uint32_t) * SPLTZ_STATIC__COUNT);
 
     // After firewall is dropped, we can simply use these sections from NS
@@ -490,9 +513,17 @@ int SPLx_TZS_INIT(void) {
     }
     SPLi_DEBUG("TZSI: tzsb[0]: 0x%08X\n", *(uint32_t*)(layout->mbase));
 
+    //SPLl_ROOTCHK(true);
+    //SPLx_TZS_PRINTTBR(true); // TEMP
+
     // Add primitives
     uint32_t smcsva;
     uint32_t *intrmgr_opes = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_INTRMGR, spl_root->fw);
+    uint32_t *sysmem_opes = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_SYSMEM, spl_root->fw);
+    if (!intrmgr_opes || !sysmem_opes) { 
+        SPLi_ERROR("TZSI: No intrmgr or sysmem opes found for fw=0x%08X\n", spl_root->fw); 
+        return -SPL_TZSI_ENOOPES; 
+    }
     layout->ismcparm[SPLTZ_ISMC_PARM_WRITE32] = intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_WRITE32];
     layout->ismcparm[SPLTZ_ISMC_PARM_READ32] = intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_READ32];
     SPLl_ROOTCHK(true);
@@ -500,15 +531,23 @@ int SPLx_TZS_INIT(void) {
     if (ret < 0)
         return ret;
     else if (!ret) { // fresh, add
-        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, layout->ismcparm[SPLTZ_ISMC_PARM_WRITE32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_WRITE32P, smcsva), ret < 0)) {
+        int mod = SPLTZ_MODINFO_INTRMGR;
+        if ((ret = SPLx_TZS_GETMODSVA(mod, 0, layout->ismcparm[SPLTZ_ISMC_PARM_WRITE32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_WRITE32P, smcsva), ret < 0)) {
 tzspli_apf:
-            SPLi_ERROR("TZSI: Failed to add tzspl primitives: 0x%X\n", ret);
+            SPLi_ERROR("TZSI: Failed to add tzspl m%d primitives: 0x%X\n", mod, ret);
             return ret;
         } else
             spl_tzs_write32 = SPLx_TZS_WRITE32;
-        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, layout->ismcparm[SPLTZ_ISMC_PARM_READ32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_READ32P, smcsva), ret < 0))
+        if ((ret = SPLx_TZS_GETMODSVA(mod, 0, layout->ismcparm[SPLTZ_ISMC_PARM_READ32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_READ32P, smcsva), ret < 0))
             goto tzspli_apf;
-        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, (intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_RET0]), &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_RET0, smcsva), ret < 0))
+        if ((ret = SPLx_TZS_GETMODSVA(mod, 0, (intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_RET0]), &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_RET0, smcsva), ret < 0))
+            goto tzspli_apf;
+        mod = SPLTZ_MODINFO_SYSMEM;
+        if ((ret = SPLx_TZS_GETMODSVA(mod, 0, sysmem_opes[SPLOPEM_UNIQ + SPLTZOPE_SYSMEM_XWSP], &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_EXEC_WITH_SP, smcsva), ret < 0))
+            goto tzspli_apf;
+        if ((ret = SPLx_TZS_GETMODSVA(mod, 0, sysmem_opes[SPLOPEM_UNIQ + SPLTZOPE_SYSMEM_MBALLOC], &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_MBALLOC, smcsva), ret < 0))
+            goto tzspli_apf;
+        if ((ret = SPLx_TZS_GETMODSVA(mod, 0, sysmem_opes[SPLOPEM_UNIQ + SPLTZOPE_SYSMEM_MBFREE], &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_MBFREE, smcsva), ret < 0))
             goto tzspli_apf;
     }
 

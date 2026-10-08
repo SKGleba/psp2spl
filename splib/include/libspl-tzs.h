@@ -12,10 +12,14 @@ enum SPLTZ_MODINFO_ENTS {
 };
 
 enum SPLTZ_SMCS {
-    SPLTZ_SMC_RET0 = 0x80,
+    SPLTZ_SMC_RESERVED_F = 0x80, // variable fastsmc
+    SPLTZ_SMC_RET0,
     SPLTZ_SMC_WRITE32P,
     SPLTZ_SMC_READ32P,
-    SPLTZ_SMC__COUNT
+    SPLTZ_SMC_RESERVED_N = 0x400, // variable normal smc
+    SPLTZ_SMC_EXEC_WITH_SP,
+    SPLTZ_SMC_MBALLOC,
+    SPLTZ_SMC_MBFREE,
 };
 
 #endif // __LIBSPL_TZS_H__

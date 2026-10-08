@@ -97,6 +97,7 @@ _Static_assert(sizeof(splv0_t1s2pb_t) == SPLS2T1_MAXSZ, "splv0_t1s2pb_t size mis
 
 #define TT_SECTION_SIZE (1024 * 1024)
 #define TT_PAGE_SIZE (4096)
+#define TT_LPAGE_SIZE (16 * TT_PAGE_SIZE)
 
 #define LENUM_MASK(_s) ((1 << (1 + (_s##__L) - (_s))) - 1)
 #define LENUM_PUT(_s, _v) (((_v) & LENUM_MASK(_s)) << (_s))
@@ -247,13 +248,27 @@ enum TTSDR_L2_SP_BITS {
 #define TTSDX_LGET(_x, _y, _e, _f) (LENUM_GET(TTSD##_x##_##_y##_e, (_f)))
 #define TTSDX_BGET(_x, _y, _e, _f) (BENUM_GET(TTSD##_x##_##_y##_e, (_f)))
 
-#define IS_MOVW(insn)  ((((uint32_t)(insn) >> 20) & 0xFF) == 0x30)
-#define MOVW_GETA(insn) \
+#define IS_AMOVW(insn)  ((((uint32_t)(insn) >> 20) & 0xFF) == 0x30)
+#define MOVW_AGETA(insn) \
     ((((uint32_t)(insn) >> 16) & 0xFUL) << 12 | ((uint32_t)(insn) & 0xFFFUL))
 
-#define IS_MOVT(insn)  ((((uint32_t)(insn) >> 20) & 0xFF) == 0x34)
-#define MOVT_GETA(insn) \
+#define IS_AMOVT(insn)  ((((uint32_t)(insn) >> 20) & 0xFF) == 0x34)
+#define MOVT_AGETA(insn) \
     (((((uint32_t)(insn) >> 16) & 0xFUL) << 12 | ((uint32_t)(insn) & 0xFFFUL)) << 16)
+
+#define IS_TMOVW(insn) (((uint32_t)(insn) & 0xFBF0) == 0xF240)
+#define IS_TMOVT(insn) (((uint32_t)(insn) & 0xFBF0) == 0xF2C0)
+#define MOVW_TGETA(insn) \
+    ((((uint32_t)(insn) >> 16) & 0xFF) \
+   | (((uint32_t)(insn) & 0xF) << 12) \
+   | ((((uint32_t)(insn) >> 28) & 0b111) << 8) \
+   | (((uint32_t)(insn) & 0x400) << 1))
+#define MOVT_TGETA(insn) (MOVW_TGETA(insn) << 16)
+
+#define IS_MOVW(insn)  (IS_AMOVW(insn) || IS_TMOVW(insn))
+#define IS_MOVT(insn)  (IS_AMOVT(insn) || IS_TMOVT(insn))
+#define MOVW_GETA(insn)  (IS_TMOVW(insn) ? MOVW_TGETA(insn) : MOVW_AGETA(insn))
+#define MOVT_GETA(insn)  (IS_TMOVT(insn) ? MOVT_TGETA(insn) : MOVT_AGETA(insn))
 
 #define TZS_SMC_FLUSH_L1C 0x10f
 
@@ -261,6 +276,7 @@ enum SPLP_TZS_OFF_ENTRIES {
     SPLTZOE_STATICS = 1,
     SPLTZOE_MODFIND,
     SPLTZOE_INTRMGR,
+    SPLTZOE_SYSMEM,
 };
 
 enum SPLTZ_STATIC_ENTS {
@@ -285,12 +301,21 @@ enum SPLTZ_INTRMGR_OPES {
     SPLTZOPE_INTRMGR_MHV_SMCH_AO32, // (2 + 8) : mhv -> intrmgr's smc handler
     SPLTZOPE_INTRMGR_FSMCT_AO32, // (0xA280 - 0x2000) : fast smc table in .data
     SPLTZOPE_INTRMGR_P2SMCT_AO32, // (0xA6A0 - 0x2000) : ptr to normal smc table
+    SPLTZOPE_INTRMGR_XW4KBMP_SYSMEM_AO32, // (0x13C4) : movp for sysmem export within first page
+    SPLTZOPE_INTRMGR_XW4KBMP_EXCPMGR_AO32, // (0x1274) : excpmgr ^
     SPLTZOPE_INTRMGR_RET0, // (0x6a3) : intrmgr:ret0
     SPLTZOPE_INTRMGR_READ32, // (0x6BB) : &FFFF:intrmgr:read32 with mask &FFFF_0 deciding reg layout
     SPLTZOPE_INTRMGR_WRITE32, // (0x30B) : &FFFF:intrmgr:write32 with mask &FFFF_0 deciding reg layout
     SPLTZOPE_INTRMGR_PTESTO, // (0x4C) : some intrmgr addr to read from and compare with next
     SPLTZOPE_INTRMGR_PTESTV, // (0xF57FF01F) : exp result of read32 ^
     SPLTZOPE_INTRMGR__COUNT
+};
+
+enum SPLTZ_SYSMEM_OPES {
+    SPLTZOPE_SYSMEM_XWSP, // (0x61) : sysmem:exec_with_sp(arg, sp, func)
+    SPLTZOPE_SYSMEM_MBALLOC, // (0x4909) : sysmem:mballoc
+    SPLTZOPE_SYSMEM_MBFREE, // (0x4AE9) : sysmem:mbfree
+    SPLTZOPE_SYSMEM__COUNT
 };
 
 enum SPLTZ_ISMC_PARMS { // gadgets that can have diff arg lays
