@@ -305,21 +305,141 @@ int SPLx_TZS_WRITE32(uint32_t sva, uint32_t val) {
     return 0;
 }
 
-int SPLx_TZS_SMCADD(int idx, uint32_t funcsva) {
+int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint32_t *rsva);
+
+int SPLx_TZS_SMC_SET(int idx, int funcsva) {
     if (SPLl_ROOTCHK(false) < 0)
         return -SPL_EBADROOT;
-    SPLi_DEBUG("SPLx_TZS_SMCADD: idx=0x%X, funcsva=0x%08X\n", idx, funcsva);
-    return SPLi_SMCALL((SPLTZ_SMC_ADDSMC), idx, funcsva, 0, 0);
+    SPLi_DEBUG("SMC_SET(0x%X): funcsva=0x%08X\n", idx, funcsva);
+    if (idx < 0 || idx > 0x4FF)
+        return -SPL_EBADARG;
+
+    int ret = 0;
+    struct tzs_layout_s *layout = &spl_root->tzs.layout;
+    if (!layout->xsmct[0] || !layout->xsmct[1]) {
+        uint32_t *fope = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_INTRMGR, spl_root->fw);
+        if (!fope) { 
+            SPLi_ERROR("No OPEs available for m%d on fw=0x%08X\n", 0, spl_root->fw); 
+            return -SPL_EBADARG; 
+        }
+        ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 1, fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_FSMCT_AO32], &layout->xsmct[SPLTZ_SMCT_FAST]);
+        if (ret < 0)
+            return ret;
+        SPLl_ROOTCHK(true);
+        uint32_t wb = fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_P2SMCT_AO32];
+        ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 1, wb, &wb);
+        if (ret < 0)
+            return ret;
+        ret = SPLx_TZS_SVA2NSVA(wb, (void*)&wb);
+        if (ret < 0) { 
+            SPLi_ERROR("Failed to get m%d %d+0x%X SVA: ret=%d\n", SPLTZ_MODINFO_INTRMGR, 1, fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_P2SMCT_AO32], ret); 
+            return ret; 
+        }
+        layout->xsmct[SPLTZ_SMCT_FULL] = *(uint32_t*)wb;
+        SPLl_ROOTCHK(true);
+        SPLi_DEBUG("TZS3: xsmct: 0x%08X, 0x%08X\n", layout->xsmct[SPLTZ_SMCT_FAST], layout->xsmct[SPLTZ_SMCT_FULL]);
+    }
+
+    int idxsva = (idx < 0x100) 
+        ? (layout->xsmct[SPLTZ_SMCT_FAST] + (idx * sizeof(uint32_t))) 
+        : (layout->xsmct[SPLTZ_SMCT_FULL] + ((idx - 0x100) * sizeof(uint32_t)));
+    if ((funcsva < 0) || !spl_tzs_write32) {
+        int *idxnsva = NULL;
+        ret = SPLx_TZS_SVA2NSVA(idxsva, (void*)&idxnsva);
+        if ((ret < 0) || !idxnsva) { 
+            SPLi_ERROR("Failed to get SMC 0x%X NSVA: ret=%d|0x%08X\n", idx, ret, (uint32_t)idxnsva); 
+            return ret; 
+        }
+        if (funcsva >= 0) {
+            *idxnsva = funcsva;
+            return SPLi_SMCALL(TZS_SMC_FLUSH_L1C, 0, 0, 0, 0);
+        }
+        return *idxnsva;
+    }
+    return spl_tzs_write32(idxsva, funcsva);
 }
 
 int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint32_t *rsva) {
     if (SPLl_ROOTCHK(false) < 0)
         return -SPL_EBADROOT;
-    if (!rsva)
+    if (!rsva || (mod >= SPLTZ_MODINFO__COUNT) || (seg && (seg != 1)))
         return -SPL_EBADARG;
     struct tzs_layout_s *layout = &spl_root->tzs.layout;
-    if (mod >= SPLTZ_MODINFO__COUNT)
-        return -SPL_EBADARG;
+    if (!layout->msva[mod].text || !layout->msva[mod].data) {
+        volatile uint32_t *sb = NULL;
+        uint32_t *fope = NULL;
+        uint32_t wb;
+        int ret = 0;
+        switch (mod) {
+            case SPLTZ_MODINFO_INTRMGR:
+                if (!layout->msva[mod].text) {
+                    sb = (volatile uint32_t *)((uint32_t)layout->mbase + layout->statics[SPLTZ_STATIC_SYSROOT]);
+                    fope = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_INTRMGR, spl_root->fw);
+                    if (!fope) { 
+                        SPLi_ERROR("No OPEs available for m%d on fw=0x%08X\n", mod, spl_root->fw); 
+                        return -SPL_TZSGMSV_EBADICFG; 
+                    }
+                    wb = sb[fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_SR_MHV_AO32]];
+                    ret = SPLx_TZS_SVA2NSVA(wb, (void*)&sb);
+                    if (ret < 0) { 
+                        SPLi_ERROR("Failed to find the xhandler table: %d\n", ret); 
+                        return ret; 
+                    }
+                    layout->msva[mod].text = sb[fope[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_MHV_SMCH_AO32]] & ~0xFFF;
+                    SPLl_ROOTCHK(true);
+                }
+            default:
+                fope = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_MODFIND, spl_root->fw);
+                if (!fope) { 
+                    SPLi_ERROR("No OPEs available for m%d on fw=0x%08X\n", mod, spl_root->fw); 
+                    return -SPL_TZSGMSV_EBADICFG; 
+                }
+                if (!layout->msva[mod].text) {
+                    if (!layout->xsmct[0] || !layout->xsmct[1]) {
+                        SPLi_ERROR("BUG: xsmct not initialized! mod=%d\n", mod);
+                        return -SPL_EBADARG;
+                    }
+                    wb = fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_SMCP];
+                    if (!wb) {
+                        SPLi_ERROR("Invalid SMCp for m%d\n", mod);
+                        return -SPL_TZSGMSV_EBADICFG;
+                    }
+                    ret = SPLx_TZS_SMC_SET(wb & 0xFFF, -1);
+                    if (ret < 0) { 
+                        SPLi_ERROR("Failed to get SMC 0x%08X: %d\n", wb, ret); 
+                        return ret; 
+                    }
+                    layout->msva[mod].text = ret - (wb >> 12);
+                    SPLl_ROOTCHK(true);
+                }
+                ret = SPLx_TZS_SVA2NSVA(layout->msva[mod].text + 0x10, (void*)&sb);
+                if (ret < 0) { 
+                    SPLi_ERROR("Failed to get m%d %d+0x%X SVA: ret=%d\n", mod, 0, 0x10, ret); 
+                    return ret; 
+                }
+                if (sb[0] != fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_WAT0x10]) { 
+                    SPLi_ERROR("Unexpected value at m%d .text+0x10\n", mod); 
+                    return ret; 
+                }
+                if (!layout->msva[mod].data && fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_DATAMP]) {
+                    wb = fope[SPLOPEM_UNIQ + (SPLTZ_MFOPE__MSIZE * mod) + SPLTZ_MFOPE_DATAMP];
+                    ret = SPLx_TZS_SVA2NSVA(layout->msva[mod].text + (wb & 0xFFFF), (void*)&sb);
+                    if (ret < 0) { 
+                        SPLi_ERROR("Failed to get m%d %d+0x%X SVA: ret=%d\n", mod, 1, wb & 0xFFFF, ret); 
+                        return ret; 
+                    }
+                    if (!IS_MOVW(sb[0]) || !IS_MOVT(sb[1])) { 
+                        SPLi_ERROR("!movp @ mod %d .text+0x%X: [0x%08X, 0x%08X]\n", mod, wb, sb[0], sb[1]);
+                        return -SPL_TZSGMSV_EBADMOVP; 
+                    }
+                    layout->msva[mod].data = (uint32_t)(MOVW_GETA(sb[0]) | MOVT_GETA(sb[1])) - (uint32_t)((wb >> 16) & 0xFFFF);
+                    SPLl_ROOTCHK(true);
+                }
+                SPLi_DEBUG("TZSGMS: m%d .text: 0x%08X | .data: 0x%08X\n", mod, layout->msva[mod].text, layout->msva[mod].data);
+                break;
+        }
+    }
+
     switch (seg) {
         case 0: 
             *rsva = layout->msva[mod].text + off;
@@ -329,50 +449,6 @@ int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint3
             return -SPL_EBADARG;
     }
     return 0;
-}
-
-static inline void SPLTZl_SMC_SET(int idx, uint32_t funcsva, bool flushl1) {
-    struct tzs_layout_s *layout = &spl_root->tzs.layout;
-    SPLi_DEBUG("SPLTZl_SMC_SET(0x%X): funcsva=0x%08X, flushl1=%d\n", idx, funcsva, flushl1);
-    if (idx < 0x100 || idx > 0x4FF) { SPLi_DEBUG("Invalid SMC index: 0x%X\n", idx); return; }
-    layout->smct[idx - 0x100] = funcsva;
-    if (flushl1) {
-        SPLi_DEBUG("Flushing sL1C\n");
-        SPLi_SMCALL(TZS_SMC_FLUSH_L1C, 0, 0, 0, 0);
-    }
-}
-
-static void *SPLTZl_SMCTABLE_FIND1(void) {
-    SPLl_ROOTCHK(true); // we use X funcs from L ctx, so need to make sure SPL root chksum is valid
-    struct tzs_layout_s *layout = &spl_root->tzs.layout;
-    //volatile uint32_t *ttbr0 = (volatile uint32_t *)((uint32_t)layout->mbase + layout->statics[SPLTZ_STATIC_TTBR0]);
-    volatile uint32_t *sb = (volatile uint32_t *)((uint32_t)layout->mbase + layout->statics[SPLTZ_STATIC_SYSROOT]);
-    uint32_t *ft1_ope = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_FT1S, spl_root->fw);
-    if (!ft1_ope) { SPLi_ERROR("No OPEs available for FT1 on fw=0x%08X\n", spl_root->fw); return NULL; }
-    // sysroot+0x31c = mon handler vectors
-    uint32_t wb = sb[ft1_ope[SPLOPEM_UNIQ + SPLTZOPE_FT1_SR_MHV_AO32]];
-    int ret = SPLx_TZS_SVA2NSVA(wb, (void*)&sb);
-    if (ret < 0) { SPLi_ERROR("Failed to find the xhandler table: %d\n", ret); return NULL; }
-
-    // mhv+40 = intrmgr's smc handler
-    wb = sb[ft1_ope[SPLOPEM_UNIQ + SPLTZOPE_FT1_MHV_SMCH_AO32]];
-    ret = SPLx_TZS_SVA2NSVA(wb, (void*)&sb);
-    if (ret < 0) { SPLi_ERROR("Failed to find the smc handler: %d\n", ret); return NULL; }
-
-    // smch has a reld movw/movt pair containing addr of a ptr to the SMC table
-    wb = sb[ft1_ope[SPLOPEM_UNIQ + SPLTZOPE_FT1_SMCH_SMCTMOVW_AO32]];
-    if (!IS_MOVW(wb)) { SPLi_ERROR("!movw @ 0x%08X: 0x%08X\n", &sb[ft1_ope[SPLOPEM_UNIQ + SPLTZOPE_FT1_SMCH_SMCTMOVW_AO32]], wb); return NULL; }
-    uint32_t tb = sb[ft1_ope[SPLOPEM_UNIQ + SPLTZOPE_FT1_SMCH_SMCTMOVT_AO32]];
-    if (!IS_MOVT(tb)) { SPLi_ERROR("!movt @ 0x%08X: 0x%08X\n", &sb[ft1_ope[SPLOPEM_UNIQ + SPLTZOPE_FT1_SMCH_SMCTMOVT_AO32]], tb); return NULL; }
-    wb = MOVW_GETA(wb) | MOVT_GETA(tb);
-    ret = SPLx_TZS_SVA2NSVA(wb, (void*)&sb);
-    if (ret < 0) { SPLi_ERROR("Failed to find the smc table ptr: %d\n", ret); return NULL; }
-    wb = sb[0];
-    SPLi_DEBUG("smc table sVA: 0x%08X\n", wb);
-    ret = SPLx_TZS_SVA2NSVA(wb, (void*)&sb);
-    if (ret < 0) { SPLi_ERROR("Failed to find the smc table: %d\n", ret); return NULL; }
-
-    return (void *)sb;
 }
 
 int SPLx_TZS_INIT(void) {
@@ -399,6 +475,7 @@ int SPLx_TZS_INIT(void) {
 
     struct tzs_layout_s *layout = &spl_root->tzs.layout;
     SPLi_MEMSET(layout, 0, sizeof(struct tzs_layout_s));
+    spl_tzs_write32 = NULL;
 
     // Statics
     uint32_t *pfw_statics = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_STATICS, spl_root->fw);
@@ -413,60 +490,42 @@ int SPLx_TZS_INIT(void) {
     }
     SPLi_DEBUG("TZSI: tzsb[0]: 0x%08X\n", *(uint32_t*)(layout->mbase));
 
-    // Find intrmgr's SMC handlers table
-    layout->smct = SPLTZl_SMCTABLE_FIND1();
-    if (!layout->smct)
-        return -SPL_TZSI_ENOSMCT;
-    SPLi_DEBUG("TZSI: tzsmct: 0x%08X\n", layout->smct);
-
     // Add primitives
+    uint32_t smcsva;
     uint32_t *intrmgr_opes = (uint32_t *)SPLl_FINDOPE((uint8_t*)((uint32_t)SPLTZl_OPS + SPLTZl_OPS_len), (uint8_t*)SPLTZl_OPS, SPLOPD_TZS_OFFS, SPLTZOE_INTRMGR, spl_root->fw);
-    layout->msva[SPLTZ_MODINFO_INTRMGR].text = (layout->smct[intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_IMSW4KB] - 0x100] & ~0xFFF);
-    SPLi_DEBUG("TZSI: intrmgr text base: 0x%08X\n", layout->msva[SPLTZ_MODINFO_INTRMGR].text);
-    uint32_t smcsva = 0, test0sva = 0;
-    SPLl_ROOTCHK(true);
-    ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_PTESTO], &test0sva);
-    if (ret < 0) {
-        SPLi_ERROR("TZSI: Failed to get test primitive nsVA: %d\n", ret);
-        return -SPL_TZSI_ENOTESTSVA;
-    }
-
-    // If not already, add primitives
     layout->ismcparm[SPLTZ_ISMC_PARM_WRITE32] = intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_WRITE32];
     layout->ismcparm[SPLTZ_ISMC_PARM_READ32] = intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_READ32];
     SPLl_ROOTCHK(true);
-    if ((SPLx_TZS_READ32(test0sva, &smcsva) < 0) || (smcsva != intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_PTESTV])) {
-        if (ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, (intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_IMSADD]), &smcsva), ret < 0) {
-            SPLi_ERROR("TZSI: Failed to get smc handler nsVA: %d\n", ret);
-            return -SPL_TZSI_ENOSMCSVA;
-        }
-        SPLTZl_SMC_SET(SPLTZ_SMC_ADDSMC, smcsva, true);
-        SPLi_DEBUG("TZSI: Adding primitives\n");
-        
-        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, (intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_IMRET0]), &smcsva), ret < 0) || (ret = SPLx_TZS_SMCADD(SPLTZ_SMC_RET0, smcsva), ret < 0)) {
-    tzspli_apf:
+    ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_RET0, -1);
+    if (ret < 0)
+        return ret;
+    else if (!ret) { // fresh, add
+        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, layout->ismcparm[SPLTZ_ISMC_PARM_WRITE32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_WRITE32P, smcsva), ret < 0)) {
+tzspli_apf:
             SPLi_ERROR("TZSI: Failed to add tzspl primitives: 0x%X\n", ret);
             return ret;
-        }
-        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, layout->ismcparm[SPLTZ_ISMC_PARM_WRITE32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMCADD(SPLTZ_SMC_WRITE32P, smcsva), ret < 0))
+        } else
+            spl_tzs_write32 = SPLx_TZS_WRITE32;
+        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, layout->ismcparm[SPLTZ_ISMC_PARM_READ32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_READ32P, smcsva), ret < 0))
             goto tzspli_apf;
-        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, layout->ismcparm[SPLTZ_ISMC_PARM_READ32] & 0xFFFF, &smcsva), ret < 0) || (ret = SPLx_TZS_SMCADD(SPLTZ_SMC_READ32P, smcsva), ret < 0))
+        if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, (intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_RET0]), &smcsva), ret < 0) || (ret = SPLx_TZS_SMC_SET(SPLTZ_SMC_RET0, smcsva), ret < 0))
             goto tzspli_apf;
     }
 
     // Tests
     SPLi_DEBUG("TZSI: Testing primitives..\n");
-    if (ret = SPLx_TZS_READ32(test0sva, &smcsva), ret < 0) {
+    if ((ret = SPLx_TZS_GETMODSVA(SPLTZ_MODINFO_INTRMGR, 0, intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_PTESTO], &smcsva), ret < 0) || (ret = SPLx_TZS_READ32(smcsva, &smcsva), ret < 0)) {
         SPLi_ERROR("TZSI: Failed to read test primitive nsVA: %d\n", ret);
+        spl_tzs_write32 = NULL;
         return -SPL_TZSI_ENOTESTSVA;
     }
     if (smcsva != intrmgr_opes[SPLOPEM_UNIQ + SPLTZOPE_INTRMGR_PTESTV]) {
         SPLi_ERROR("TZSI: Test smc_read32 returned !magic: 0x%X\n", smcsva);
+        spl_tzs_write32 = NULL;
         return -SPL_TZSI_EBADTEST;
     }
 
     SPLi_DEBUG("TZSI: success\n");
-    spl_tzs_write32 = SPLx_TZS_WRITE32;
     spl_root->tzs.initialized = true;
     SPLl_ROOTCHK(true);
     return 0;

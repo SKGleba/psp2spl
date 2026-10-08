@@ -64,6 +64,9 @@ enum SPL_ERRORS {
 	SPL_TZSV2P_EUNRL1PTE,
 	SPL_TZSV2P_E404,
 
+	SPL_TZSGMSV_EBADICFG,
+	SPL_TZSGMSV_EBADMOVP,
+
 	SPL_INIT_ENOIMPORTS,
 };
 
@@ -142,7 +145,7 @@ struct spl_init_arg_s {
 	int SPLx_TZS_SVA2NSVA(uint32_t sva, void **rnsva);
 	int SPLx_TZS_READ32(uint32_t sva, uint32_t *rval);
 	int SPLx_TZS_WRITE32(uint32_t sva, uint32_t val);
-	int SPLx_TZS_SMCADD(int idx, uint32_t funcsva);
+	int SPLx_TZS_SMC_SET(int idx, int funcsva);
 	int SPLx_TZS_GETMODSVA(enum SPLTZ_MODINFO_ENTS mod, int seg, uint32_t off, uint32_t *rsva);
 	int SPLx_TZS_INIT(void);
 	int SPLx_TZS_DEINIT(void);

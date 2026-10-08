@@ -124,7 +124,7 @@ int ksplmTzsCmd(int cmd, int argx, void *argv) {
 		break; case SPLM_TZS_CMD_SVA2NSVA:
 			ret = SPLx_TZS_SVA2NSVA((uint32_t)argx, (void*)argv);
 		break; case SPLM_TZS_CMD_SMCADD:
-			ret = SPLx_TZS_SMCADD((int)argx, *(uint32_t*)argv);
+			ret = SPLx_TZS_SMC_SET((int)argx, *(uint32_t*)argv);
 		break; case SPLM_TZS_CMD_GETMODSVA: {
 			struct splmTzsGetModSVA_arg_s *arg = (struct splmTzsGetModSVA_arg_s *)argv;
 			ret = SPLx_TZS_GETMODSVA((enum SPLTZ_MODINFO_ENTS)arg->id, (int)arg->seg, arg->off, &arg->sva);

@@ -255,30 +255,11 @@ enum TTSDR_L2_SP_BITS {
 #define MOVT_GETA(insn) \
     (((((uint32_t)(insn) >> 16) & 0xFUL) << 12 | ((uint32_t)(insn) & 0xFFFUL)) << 16)
 
-enum SPLTZ_FT1_OPES {
-    SPLTZOPE_FT1_SR_MHV_AO32 = 0, // (0xC7) : sysroot -> mon handler vectors
-    SPLTZOPE_FT1_MHV_SMCH_AO32, // (2 + 8) : mhv -> intrmgr's smc handler
-    SPLTZOPE_FT1_SMCH_SMCTMOVW_AO32, // ((0x248 - 0x1c8) / 4) : smch -> *smct movw
-    SPLTZOPE_FT1_SMCH_SMCTMOVT_AO32, // ((0x24C - 0x1c8) / 4) : smch -> *smct movt
-    SPLTZOPE_FT1__COUNT
-};
-
 #define TZS_SMC_FLUSH_L1C 0x10f
-
-enum SPLTZ_INTRMGR_OPES {
-    SPLTZOPE_INTRMGR_IMSW4KB = 0, // (0x107) : smc inside intrmgr .text's first 4KB
-    SPLTZOPE_INTRMGR_IMSADD, // (0xAE1) : intrmgr:add_smc
-    SPLTZOPE_INTRMGR_IMRET0, // (0x6a3) : intrmgr:ret0
-    SPLTZOPE_INTRMGR_READ32, // (0x6BB) : &FFFF:intrmgr:read32 with mask &FFFF_0 deciding reg layout
-    SPLTZOPE_INTRMGR_WRITE32, // (0x30B) : &FFFF:intrmgr:write32 with mask &FFFF_0 deciding reg layout
-    SPLTZOPE_INTRMGR_PTESTO, // (0x4C) : some intrmgr addr to read from and compare with next
-    SPLTZOPE_INTRMGR_PTESTV, // (0xF57FF01F) : exp result of read32 ^
-    SPLTZOPE_INTRMGR__COUNT
-};
 
 enum SPLP_TZS_OFF_ENTRIES {
     SPLTZOE_STATICS = 1,
-    SPLTZOE_FT1S,
+    SPLTZOE_MODFIND,
     SPLTZOE_INTRMGR,
 };
 
@@ -289,6 +270,27 @@ enum SPLTZ_STATIC_ENTS {
     SPLTZ_STATIC_TTBR0,
     SPLTZ_STATIC_TTBR1,
     SPLTZ_STATIC__COUNT
+};
+
+enum SPLTZ_MODFIND_OPES {
+    SPLTZ_MFOPE_SMCP = 0, // (smc_off << 12) | smc_idx
+    SPLTZ_MFOPE_WAT0x10, // val at *(.text+0x10)
+    SPLTZ_MFOPE_DATAMP, // (m2data_off << 16) | data_movp_off
+    SPLTZ_MFOPE__MSIZE,
+    SPLTZ_MFOPE__COUNT = (SPLTZ_MFOPE__MSIZE * SPLTZ_MODINFO__COUNT)
+};
+
+enum SPLTZ_INTRMGR_OPES {
+    SPLTZOPE_INTRMGR_SR_MHV_AO32 = 0, // (0xC7) : sysroot -> mon handler vectors
+    SPLTZOPE_INTRMGR_MHV_SMCH_AO32, // (2 + 8) : mhv -> intrmgr's smc handler
+    SPLTZOPE_INTRMGR_FSMCT_AO32, // (0xA280 - 0x2000) : fast smc table in .data
+    SPLTZOPE_INTRMGR_P2SMCT_AO32, // (0xA6A0 - 0x2000) : ptr to normal smc table
+    SPLTZOPE_INTRMGR_RET0, // (0x6a3) : intrmgr:ret0
+    SPLTZOPE_INTRMGR_READ32, // (0x6BB) : &FFFF:intrmgr:read32 with mask &FFFF_0 deciding reg layout
+    SPLTZOPE_INTRMGR_WRITE32, // (0x30B) : &FFFF:intrmgr:write32 with mask &FFFF_0 deciding reg layout
+    SPLTZOPE_INTRMGR_PTESTO, // (0x4C) : some intrmgr addr to read from and compare with next
+    SPLTZOPE_INTRMGR_PTESTV, // (0xF57FF01F) : exp result of read32 ^
+    SPLTZOPE_INTRMGR__COUNT
 };
 
 enum SPLTZ_ISMC_PARMS { // gadgets that can have diff arg lays
@@ -303,14 +305,16 @@ enum SPLTZ_ISMC_PARMS { // gadgets that can have diff arg lays
 
 struct tzs_layout_s {
     void *mbase;
-    volatile uint32_t *smct;
     uint32_t statics[SPLTZ_STATIC__COUNT];
+    uint32_t xsmct[2];
     struct {
         uint32_t text;
         uint32_t data;
     } msva[SPLTZ_MODINFO__COUNT];
     uint32_t ismcparm[SPLTZ_ISMC_PARM__COUNT];
 };
+#define SPLTZ_SMCT_FAST 0
+#define SPLTZ_SMCT_FULL 1
 
 extern const uint32_t SPLTZl_OPS[];
 extern const int SPLTZl_OPS_len;
